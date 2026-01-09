@@ -2,6 +2,7 @@
 Fuzzy Random Forest Classifier (class-based)
 """
 import numpy as np
+from scipy.stats import beta
 from geopandas import read_file
 from rasterio import open as rio_open
 from rasterio.features import rasterize
@@ -170,14 +171,22 @@ class FuzzyRF:
     
 
     def mc_draws(self, n_draws):
-        """ Draw a number of new fuzzy rasters for Monte Carlo analysis """
-        # draw from beta distribution
-        mc_draws = self.rng.beta(self.a[:,:,None], self.b[:,:,None], size=(self.a.shape[0], self.a.shape[1], n_draws))
+        """ 
+        Draw a number of new fuzzy rasters for Monte Carlo analysis using CRN (one randon mumber per landscape) 
         
-        # normalize along classes
-        mc_draws /= mc_draws.sum(axis=0, keepdims=True)
-        return mc_draws
+        Non CRN version:
+            mc_draws = self.rng.beta(self.a[:,:,None], self.b[:,:,None], size=(self.a.shape[0], self.a.shape[1], n_draws))
+        """
+        # Draw common uniforms (one per draw) and reshape for broadcasting
+        x = self.rng.uniform(0.0, 1.0, size=n_draws)  # (n_draws,)
+        x = x[None, None, :]  # (1, 1, n_draws)
 
+        # use the randon mumbers to draw n random landscapes
+        mc = beta.ppf(x, self.a[:, :, None], self.b[:, :, None])
+
+        # normalize across classes
+        mc /= mc.sum(axis=0, keepdims=True)
+        return mc
 
 
 # example usage
