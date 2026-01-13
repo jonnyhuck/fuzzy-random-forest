@@ -3,9 +3,6 @@ Fuzzy Random Forest Classifier (class-based)
 """
 import numpy as np
 from scipy.stats import beta
-from geopandas import read_file
-from rasterio import open as rio_open
-from rasterio.features import rasterize
 from sklearn.metrics import confusion_matrix
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
@@ -15,19 +12,18 @@ class FuzzyRF:
     Class for Fuzzy Random Forest classifier with Beta simulators.
     """
 
-    def __init__(self, raster_path, bands, vector_path, trees=20, branches=8):
+    def __init__(self, input_data, trees=20, branches=8):
         """
         Constructor
         """
         # instance variables
-        self.raster_path = raster_path
-        self.vector_path = vector_path
         self.trees = trees
         self.branches = branches
         self.rng = np.random.default_rng()
+        self.rows, self.cols = input_data[0].shape[:2]
 
         # load raster and vector training data
-        self.stacked_array, self.X, self.y = self._prepare_training_data(bands)
+        self.stacked_array, self.X, self.y = input_data
 
         # separate data into train and test
         X_train, X_test, y_train, y_test = train_test_split(self.X, self.y, test_size=0.2, random_state=42)
@@ -44,6 +40,7 @@ class FuzzyRF:
         n_samples = self.stacked_array.shape[0] * self.stacked_array.shape[1]
         X_img = self.stacked_array.reshape(n_samples, self.stacked_array.shape[2])
         self.tree_probs = np.array([ est.predict_proba(X_img) for est in self.clf.estimators_ ])  # (trees, cells, classes)
+        self.classes = self.tree_probs.shape[2]
 
         # combine probabilities with those from the confusion matrix using power posterior
         self._adjust_tree_probs()
@@ -51,36 +48,6 @@ class FuzzyRF:
         # compute Beta parameters (method-of-moments)
         class_probs = self.tree_probs.transpose(2,1,0)  # (classes, cells, trees)
         self.a, self.b = self.method_of_moments(class_probs)
-
-
-    def _prepare_training_data(self, bands_to_use):
-        """
-        Prep the training data
-        TODO: will need a raster/raster version of this too for CEH work
-        """
-        # load raster dataset
-        with rio_open(self.raster_path) as src:
-            
-            # extract required bands and shift axes
-            bands = src.read(bands_to_use)
-            stacked_array = np.moveaxis(bands, 0, -1)  # (rows, cols, bands)
-
-            # load vector training dataset, ensure class data is numeric
-            training_data = read_file(self.vector_path).to_crs("EPSG:32630")
-            training_data['_mode'] = training_data['_mode'].astype(int)
-            
-            # TODO: THIS IS JUST FOR MY EXAMPLE!!!
-            # training_data = training_data.sample(frac=0.2)  
-
-            # rasterize training geometries and mask out of imagery
-            label_raster = rasterize( zip(training_data.geometry, training_data['_mode']), 
-                                     out_shape=(src.height, src.width), transform=src.transform)
-            mask = label_raster > 0
-            X = stacked_array[mask]
-            y = label_raster[mask]
-
-        # return 
-        return stacked_array, X, y
 
 
     def _adjust_tree_probs(self):
@@ -186,17 +153,69 @@ class FuzzyRF:
 
         # normalize across classes
         mc /= mc.sum(axis=0, keepdims=True)
-        return mc
+
+        # reshape into landscapes and return
+        return mc.transpose(2, 0, 1).reshape(n_draws, self.classes, self.rows, self.cols)   # (draws, classes, rows, cols)
 
 
 # example usage
 if __name__ == "__main__":
+
+    from geopandas import read_file
+    from rasterio import open as rio_open
+    from rasterio.features import rasterize
+    from matplotlib.pyplot import imshow, show
+
+
+    def prepare_training_data(raster_path, bands_to_use, vector_path):
+        """
+        Prep the training data
+        """
+        # load raster dataset
+        with rio_open(raster_path) as src:
+            
+            # extract required bands and shift axes
+            bands = src.read(bands_to_use)
+            stacked_array = np.moveaxis(bands, 0, -1)  # (rows, cols, bands)
+
+            # load vector training dataset, ensure class data is numeric
+            training_data = read_file(vector_path).to_crs("EPSG:32630")
+            training_data['_mode'] = training_data['_mode'].astype(int)
+            
+            # THIS IS JUST FOR MY DEMO DATA!!!
+            training_data = training_data.sample(frac=0.2)  
+
+            # rasterize training geometries and mask out of imagery
+            label_raster = rasterize( zip(training_data.geometry, training_data['_mode']), 
+                                     out_shape=(src.height, src.width), transform=src.transform)
+            mask = label_raster > 0
+            X = stacked_array[mask]
+            y = label_raster[mask]
+
+        # return 
+        return stacked_array, X, y
+
+
     RASTER_PATH = '../data/Arnside_Silverdale_no_crop.tif'
     BANDS = [2, 3, 4, 8]
     VECTOR_PATH = "../data/Download_Silverdale_2532092/lcm-2021-vec_5552404/lcm-2021-vec_5552404.gpkg"
     
+    # prepare training data
+    print('prep...')
+    prep = prepare_training_data(RASTER_PATH, BANDS, VECTOR_PATH)
+
     # create an instance of the fuzzy random forest class
-    frf = FuzzyRF(RASTER_PATH, BANDS, VECTOR_PATH, trees=20, branches=3)
+    print('training...')
+    frf = FuzzyRF(prep, trees=20, branches=3)
     
     # use it to draw n landscapes
-    print(frf.mc_draws(1))
+    print('drawing...')
+    landscapes = frf.mc_draws(5)
+    print(f"Returns {landscapes.shape[0]} draws, {landscapes.shape[1]} classes, for a landscape of {landscapes.shape[3]}x{landscapes.shape[2]} cells.")
+
+    # get the median of the draws
+    medians = np.median(landscapes, axis=0)
+    
+    # show the output surface for each class
+    imshow(medians[0])
+    show()
